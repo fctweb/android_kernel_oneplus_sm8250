@@ -1674,6 +1674,17 @@ struct task_struct {
 
 	ANDROID_KABI_USE(1, unsigned frozen:1);
 
+#if defined(CONFIG_KSU_SUSFS)
+	ANDROID_KABI_USE(6, u64 susfs_task_state);
+	ANDROID_KABI_USE(8, u64 susfs_last_fake_mnt_id);
+#endif // #if defined(CONFIG_KSU_SUSFS)
+
+#if defined(CONFIG_KSU_SUSFS) && !defined(ANDROID_KABI_RESERVE)
+	u64 susfs_task_state;
+#endif
+#if defined(CONFIG_KSU_SUSFS) && !defined(ANDROID_KABI_RESERVE)
+	u64 susfs_last_fake_mnt_id;
+#endif
 	/*
 	 * New fields for task_struct should be added above here, so that
 	 * they are included in the randomized portion of task_struct.
