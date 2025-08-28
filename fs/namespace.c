@@ -1159,7 +1159,7 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
 	int mnt_id;
 
 	bool is_current_ksu_domain = susfs_is_current_ksu_domain();
-	bool is_zygote_not_copy_mnt_ns = (susfs_is_current_zygote_domain() && !(flag & CL_COPY_MNT_NS));
+	bool is_current_zygote_domain = susfs_is_current_zygote_domain();
 
 	/* - It is very important that we need to use CL_COPY_MNT_NS to identify whether
 	 *   the clone is a copy_tree() or single mount like called by __do_loopback()
@@ -1252,7 +1252,7 @@ bypass_orig_flow:
 	//   yet attached to the current mnt_ns during copy_tree() so that it will fail to calculate
 	//   the correct fake mnt_id.
 	// - Currently we have a tmep fix for this in copy_tree(), but maybe not reliable for other devices
-	if (susfs_is_current_zygote_domain()) {
+	if (likely(is_current_zygote_domain) && !(flag & CL_COPY_MNT_NS)) {
 		mnt_ns = current->nsproxy->mnt_ns;
 		if (mnt_ns) {
 			get_mnt_ns(mnt_ns);
