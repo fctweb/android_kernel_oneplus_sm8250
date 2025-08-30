@@ -7,7 +7,7 @@ gki_support = yes
 endif
 
 subdir-ccflags-y += -I$(srctree)/$(src)
-subdir-ccflags-y += -Werror=parentheses
+subdir-ccflags-y += -Werror=parentheses -Wframe-larger-than=3042
 subdir-ccflags-y += -DOPLUS_CHG_KO_BUILD
 ccflags-$(CONFIG_OPLUS_DYNAMIC_CONFIG_CHARGER) += -I$(srctree)/drivers/power/oplus/config
 
@@ -66,6 +66,7 @@ oplus_chg-y += oplus_configfs.o
 oplus_chg-y += oplus_chg_ops_manager.o
 oplus_chg-y += oplus_region_check.o
 oplus_chg-y += oplus_pps_ops_manager.o
+oplus_chg-y += oplus_chg_audio_switch.o
 oplus_chg-y += adapter_ic/oplus_stm.o
 oplus_chg-y += charger_ic/oplus_short_ic.o
 oplus_chg-y += gauge_ic/oplus_bq27541.o
@@ -320,6 +321,7 @@ ccflags-y += -I$(srctree)/drivers/misc/mediatek/typec/tcpc/inc
 obj-y   += oplus_chg_audio_switch.o
 endif
 #obj-y   += oplus_voocphy.o
+obj-y   += oplus_chg_audio_switch.o
 obj-y	+= oplus_charger.o
 obj-y	+= oplus_battery_log.o
 obj-y	+= oplus_gauge.o
