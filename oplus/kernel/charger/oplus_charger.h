@@ -1370,6 +1370,9 @@ struct oplus_chg_chip {
 	struct delayed_work vbatt_diff_over_load_trigger_work;
 	oplus_chg_track_trigger cool_down_match_err_load_trigger;
 	struct delayed_work cool_down_match_err_load_trigger_work;
+	oplus_chg_track_trigger *mmi_chg_info_trigger;
+	struct delayed_work mmi_chg_info_trigger_work;
+	struct mutex mmi_chg_info_lock;
 	struct reserve_soc_data rsd;
 	bool is_gauge_ready;
 
@@ -1427,6 +1430,7 @@ struct oplus_chg_chip {
 	int bms_heat_temp_compensation;
 	int chg_cycle_status;
 	struct oplus_cpa_protocol_info protocol_prio_table[CHG_PROTOCOL_MAX];
+	int pre_chg_up_limit_mmi_val;
 };
 
 #define SOFT_REST_VOL_THRESHOLD		4300
@@ -1802,5 +1806,7 @@ void oplus_test_kit_unregister(void);
 #endif
 int oplus_get_adapter_power(void);
 int oplus_get_project_power(void);
+int oplus_set_chg_up_limit(int charge_limit_enable, int charge_limit_value,
+	int is_force_set_charge_limit, int charge_limit_recharge_value, int callname);
 //#endif
 #endif /*_OPLUS_CHARGER_H_*/

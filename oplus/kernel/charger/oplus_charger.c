@@ -3439,6 +3439,35 @@ static void oplus_chg_track_cool_down_match_err_load_trigger_work(struct work_st
 	oplus_chg_track_upload_trigger_data(chip->cool_down_match_err_load_trigger);
 }
 
+int oplus_chg_track_upload_mmi_chg_info(struct oplus_chg_chip *chip, int mmi_chg)
+{
+	int index = 0;
+
+	if (!chip)
+		return -EINVAL;
+
+	mutex_lock(&chip->mmi_chg_info_lock);
+	if (chip->mmi_chg_info_trigger)
+		kfree(chip->mmi_chg_info_trigger);
+
+	chip->mmi_chg_info_trigger = kzalloc(sizeof(oplus_chg_track_trigger), GFP_KERNEL);
+	if (!chip->mmi_chg_info_trigger) {
+		pr_err("mmi_chg_info_trigger memery alloc fail\n");
+		mutex_unlock(&chip->mmi_chg_info_lock);
+		return -ENOMEM;
+	}
+
+	chip->mmi_chg_info_trigger->type_reason = TRACK_NOTIFY_TYPE_GENERAL_RECORD;
+	chip->mmi_chg_info_trigger->flag_reason = TRACK_NOTIFY_FLAG_MMI_CHG_INFO;
+	index += snprintf(&(chip->mmi_chg_info_trigger->crux_info[index]), OPLUS_CHG_TRACK_CURX_INFO_LEN - index,
+			  "$$mmi_chg@@%d", mmi_chg);
+	oplus_chg_track_obtain_power_info(&(chip->mmi_chg_info_trigger->crux_info[index]),
+					  OPLUS_CHG_TRACK_CURX_INFO_LEN - index);
+
+	schedule_delayed_work(&chip->mmi_chg_info_trigger_work, 0);
+	chg_info("success\n");
+	return 0;
+}
 static int oplus_chg_track_debugfs_init(struct oplus_chg_chip *chip)
 {
 	int ret = 0;
@@ -7551,6 +7580,7 @@ void oplus_chg_variables_reset(struct oplus_chg_chip *chip, bool in)
 	chip->adsp_notify_ap_suspend = 0;
 	chip->stop_voter = 0x00;
 	chip->charging_state = CHARGING_STATUS_CCCV;
+	chip->pre_chg_up_limit_mmi_val = 0;
 #ifndef SELL_MODE
 	if (chip->mmi_fastchg == 0) {
 		chip->mmi_chg = 0;
@@ -7896,6 +7926,7 @@ static void oplus_chg_variables_init(struct oplus_chg_chip *chip)
 	chip->usbin_abnormal_status = false;
 	chip->check_usbin_from_adsp_cnt = 0;
 	chip->usb_present_vbus0_count = 0;
+	chip->pre_chg_up_limit_mmi_val = 0;
 }
 
 static void oplus_chg_fail_action(struct oplus_chg_chip *chip)
@@ -9627,6 +9658,153 @@ static void fg_update(struct oplus_chg_chip *chip)
 	}
 }
 
+int mmi_charging_enable(struct oplus_chg_chip *chip, int val)
+{
+	int ret = 0;
+
+	chg_err("set mmi_chg = [%d].\n", val);
+	chip->total_time = 0;
+	if (val == 0) {
+		if (chip->unwakelock_chg == 1) {
+			ret = -EINVAL;
+			chg_err("unwakelock testing , this test not allowed.\n");
+		} else {
+			oplus_chg_track_upload_mmi_chg_info(chip, 0);
+			chip->mmi_chg = 0;
+			if ((chip->vooc_project) && (oplus_vooc_get_fastchg_started() == true)) {
+				chip->mmi_fastchg = 0;
+			}
+			if (oplus_chg_get_voocphy_support() == ADSP_VOOCPHY) {
+				oplus_adsp_voocphy_turn_off();
+			} else {
+				if ((oplus_pps_get_support_type() != PPS_SUPPORT_NOT) &&
+					oplus_pps_get_pps_fastchg_started()) {
+					oplus_pps_stop_mmi();
+				} else if (!(((chip->pd_svooc == false &&
+					chip->chg_ops->get_charger_subtype() == CHARGER_SUBTYPE_PD) ||
+					chip->chg_ops->get_charger_subtype() == CHARGER_SUBTYPE_QC) &&
+					!oplus_vooc_get_fastchg_started()))
+					oplus_vooc_turn_off_fastchg();
+			}
+			/* avoid asic vooc bulk still enable after mmi_chg set 0 */
+			oplus_chg_turn_off_charging(chip);
+			if (oplus_voocphy_get_bidirect_cp_support() && chip->chg_ops->check_chrdet_status()) {
+				oplus_voocphy_set_chg_auto_mode(true);
+			}
+		}
+	} else {
+		if (chip->unwakelock_chg == 1) {
+			ret = -EINVAL;
+			chg_err("unwakelock testing , this test not allowed.\n");
+		} else {
+			oplus_chg_track_upload_mmi_chg_info(chip, 1);
+			chip->mmi_chg = 1;
+			if (chip->mmi_fastchg == 0) {
+				oplus_chg_clear_chargerid_info();
+			}
+			chip->mmi_fastchg = 1;
+			if (oplus_voocphy_get_bidirect_cp_support()) {
+				oplus_voocphy_set_chg_auto_mode(false);
+			}
+			if (!chip->otg_online && !oplus_vooc_get_fastchg_started())
+				oplus_chg_turn_on_charging_in_work();
+			if (oplus_chg_get_voocphy_support() == ADSP_VOOCPHY) {
+				oplus_adsp_voocphy_turn_on();
+			}
+		}
+	}
+
+	return ret;
+}
+
+typedef struct {
+	int charge_limit_enable;
+	int charge_limit_value;
+	int is_force_set_charge_limit;
+	int charge_limit_recharge_value;
+	int callname;
+}chg_up_limit_info;
+static chg_up_limit_info chg_up_limit_data;
+
+int oplus_set_chg_up_limit(int charge_limit_enable, int charge_limit_value,
+	int is_force_set_charge_limit, int charge_limit_recharge_value, int callname)
+{
+	chg_up_limit_data.charge_limit_enable = charge_limit_enable;
+	chg_up_limit_data.charge_limit_value = charge_limit_value;
+	chg_up_limit_data.is_force_set_charge_limit = is_force_set_charge_limit;
+	chg_up_limit_data.charge_limit_recharge_value = charge_limit_recharge_value;
+	chg_up_limit_data.callname = callname;
+
+	return 1;
+}
+
+int oplus_enforce_chg_up_limit_result(struct oplus_chg_chip *chip, bool cut_off_charge)
+{
+	int val = cut_off_charge;
+	int rc = 0;
+	static int pre_is_force_charge_limit = 0;
+
+	if (val == chip->pre_chg_up_limit_mmi_val && chg_up_limit_data.is_force_set_charge_limit == pre_is_force_charge_limit)
+		return rc;
+
+	chg_info("oplus_enforce_chg_up_limit_result begain %d %d %d %d\n", val, chip->pre_chg_up_limit_mmi_val,
+		chg_up_limit_data.is_force_set_charge_limit, pre_is_force_charge_limit);
+
+	chip->pre_chg_up_limit_mmi_val = val;
+	pre_is_force_charge_limit = chg_up_limit_data.is_force_set_charge_limit;
+
+	if (chg_up_limit_data.is_force_set_charge_limit == 0) {
+		rc = mmi_charging_enable(chip, !val);
+	} else {
+		rc = mmi_charging_enable(chip, !val);
+	}
+
+	if (rc < 0)
+		chg_err("can't set charging %s, rc=%d\n",
+		       val ? "disable" : "enable", rc);
+	else
+		chg_info("mmi set charging %s\n", val ? "disable" : "enable");
+
+	chg_info("oplus_enforce_chg_up_limit_result end %d %d %d %d %d %d\n", val, chg_up_limit_data.charge_limit_enable,
+		chg_up_limit_data.charge_limit_value, chg_up_limit_data.is_force_set_charge_limit,
+		chg_up_limit_data.charge_limit_recharge_value, chg_up_limit_data.callname);
+	return rc;
+}
+
+#define CHG_UP_DELAY_COUNT		5
+void monitor_ui_soc_to_enable_chg_up_limit(struct oplus_chg_chip *chip)
+{
+	static int over_count = 0;
+
+	chg_info("monitor_ui_soc_to_enable_chg_up_limit: charge_limit_enable=%d, ui_soc=%d %d %d %d",
+		chg_up_limit_data.charge_limit_enable, chip->ui_soc, chg_up_limit_data.charge_limit_value,
+		chg_up_limit_data.charge_limit_recharge_value, over_count);
+
+	if (chg_up_limit_data.charge_limit_enable == 1) {
+		if (chip->ui_soc > chg_up_limit_data.charge_limit_value) {
+			over_count = 0;
+			oplus_enforce_chg_up_limit_result(chip, true);
+			return;
+		} else if (chip->ui_soc == chg_up_limit_data.charge_limit_value) {
+			over_count++;
+			if (over_count >= CHG_UP_DELAY_COUNT) {
+				over_count = CHG_UP_DELAY_COUNT;
+				oplus_enforce_chg_up_limit_result(chip, true);
+			}
+			return;
+		} else if (chip->ui_soc >= chg_up_limit_data.charge_limit_recharge_value) {
+			over_count = 0;
+			return;
+		} else {
+			over_count = 0;
+			oplus_enforce_chg_up_limit_result(chip, false);
+			return;
+		}
+	}
+	over_count = 0;
+	oplus_enforce_chg_up_limit_result(chip, false);
+	return;
+}
 #define BATTERY_UPDATE_THD 4
 static void battery_update(struct oplus_chg_chip *chip)
 {
@@ -9637,6 +9815,7 @@ static void battery_update(struct oplus_chg_chip *chip)
 #endif
 
 	oplus_chg_update_ui_soc(chip);
+	monitor_ui_soc_to_enable_chg_up_limit(chip);
 
 	if (chip->fg_bcl_poll) {
 		fg_update(chip);

@@ -255,6 +255,18 @@ static const char *const strategy_low_curr_full[] = {
 	[PPS_LOW_CURR_FULL_CURVE_TEMP_NORMAL_HIGH] = "strategy_temp_normal_high",
 };
 
+#define TRACK_LOCAL_T_NS_TO_S_THD 1000000000
+#define TRACK_UPLOAD_COUNT_MAX 10
+#define TRACK_DEVICE_ABNORMAL_UPLOAD_PERIOD (24 * 3600)
+static int pps_track_get_local_time_s(void)
+{
+	int local_time_s;
+
+	local_time_s = local_clock() / TRACK_LOCAL_T_NS_TO_S_THD;
+	pps_err("local_time_s:%d\n", local_time_s);
+
+	return local_time_s;
+}
 static int oplus_pps_parse_charge_strategy(struct oplus_pps_chip *chip)
 {
 	int rc;
@@ -3804,6 +3816,42 @@ void oplus_pps_stop_usb_temp(void)
 
 	chip->pps_stop_status = PPS_STOP_VOTER_USB_TEMP;
 	oplus_chg_sc8571_error((1 << PPS_REPORT_ERROR_USBTEMP_OVER), NULL, 0);
+	oplus_pps_voter_charging_stop(chip);
+}
+
+void oplus_pps_stop_mmi(void)
+{
+	struct oplus_pps_chip *chip = &g_pps_chip;
+	if (!chip || !chip->ops || !chip->pps_support_type)
+		return;
+
+	chip->pps_stop_status = PPS_STOP_VOTER_MMI_TEST;
+	oplus_pps_voter_charging_stop(chip);
+}
+
+void oplus_pps_stop_volt_adjust_fail(void)
+{
+	struct oplus_pps_chip *chip = &g_pps_chip;
+	if (!chip || !chip->ops || !chip->pps_support_type)
+		return;
+
+	chip->pps_stop_status = PPS_STOP_VOTER_VOLT_ADJUST_FAIL;
+	oplus_pps_voter_charging_stop(chip);
+}
+
+void oplus_pps_stop_flash_led(bool on)
+{
+	struct oplus_pps_chip *chip = &g_pps_chip;
+
+	if (!chip || !chip->ops || !chip->pps_support_type || chip->pps_flash_unsupport)
+		return;
+
+	if (on) {
+		chip->pps_stop_status = PPS_STOP_VOTER_FLASH_LED;
+	} else {
+		chip->pps_recover_cnt = pps_track_get_local_time_s();
+	}
+
 	oplus_pps_voter_charging_stop(chip);
 }
 
