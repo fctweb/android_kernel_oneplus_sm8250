@@ -570,6 +570,7 @@ typedef enum {
 	POWER_BANK_88W = 18,
 	POWER_BANK_55W = 19,
 	POWER_BANK_125W = 20,
+	POWER_BANK_45W = 21,
 	INVALID_VOOC_PROJECT,
 } OPLUS_VOOC_PROJECT_TYPE;
 
@@ -971,6 +972,22 @@ typedef enum {
 #define AGING1_FFC2_DOUBLE_OFFSET_MV	10
 #define AGING2_FFC1_DOUBLE_OFFSET_MV	30
 #define AGING2_FFC2_DOUBLE_OFFSET_MV	20
+enum oplus_chg_protocol_type {
+	CHG_PROTOCOL_INVALID = -1,
+	CHG_PROTOCOL_BC12 = 0,
+	CHG_PROTOCOL_PD,
+	CHG_PROTOCOL_PPS,
+	CHG_PROTOCOL_VOOC,
+	CHG_PROTOCOL_UFCS,
+	CHG_PROTOCOL_QC,
+	CHG_PROTOCOL_MAX,
+};
+
+struct oplus_cpa_protocol_info {
+	enum oplus_chg_protocol_type type;
+	int power_mw;
+	int max_power_mw;
+};
 
 struct oplus_chg_chip {
 	struct i2c_client *client;
@@ -1409,6 +1426,7 @@ struct oplus_chg_chip {
 
 	int bms_heat_temp_compensation;
 	int chg_cycle_status;
+	struct oplus_cpa_protocol_info protocol_prio_table[CHG_PROTOCOL_MAX];
 };
 
 #define SOFT_REST_VOL_THRESHOLD		4300
@@ -1782,5 +1800,7 @@ int oplus_get_ccdetect_online(void);
 #if IS_ENABLED(CONFIG_OPLUS_CHG_TEST_KIT)
 void oplus_test_kit_unregister(void);
 #endif
+int oplus_get_adapter_power(void);
+int oplus_get_project_power(void);
 //#endif
 #endif /*_OPLUS_CHARGER_H_*/

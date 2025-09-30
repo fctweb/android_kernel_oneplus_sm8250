@@ -47,8 +47,11 @@ int oplus_wpc_get_online_status(void)
 		return 0;
 	}
 
-	if (g_wpc_chip->wpc_ops && g_wpc_chip->wpc_ops->wpc_get_online_status)
+	if (g_wpc_chip->wpc_ops && g_wpc_chip->wpc_ops->wpc_get_online_status){
+		chg_info("oplus_wpc_get_online_status is %d, g_wpc_chip->wpc_ops->wpc_get_online_status()");
 		return g_wpc_chip->wpc_ops->wpc_get_online_status();
+	}
+		
 	else
 		return 0;
 }
