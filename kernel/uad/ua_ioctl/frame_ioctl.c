@@ -17,6 +17,7 @@
 #include <../kernel/sched_assist/sched_assist_common.h>
 #include <../kernel/tuning/frame_boost.h>
 #include <../kernel/tuning/frame_info.h>
+#include <../kernel/tuning/frame_rescue.h>
 #endif /* CONFIG_ARCH_MEDIATEK */
 
 #include "frame_ioctl.h"
@@ -542,6 +543,43 @@ static const struct file_operations ofb_frame_group_info_fops = {
 	.release	= single_release,
 };
 
+static int rescue_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, frame_rescue_proc_show, NULL);
+}
+
+static ssize_t rescue_proc_write(struct file *file, const char __user *buf,
+				 size_t count, loff_t *ppos)
+{
+	char kbuf[64];
+	int enable, stage, frame;
+	if (count >= sizeof(kbuf))
+		return -EINVAL;
+	if (copy_from_user(kbuf, buf, count))
+		return -EFAULT;
+	kbuf[count] = '\0';
+	if (sscanf(kbuf, "%d %d %d", &enable, &stage, &frame) == 3) {
+		if (enable == 0 || enable == 1)
+			sysctl_rescue_enable = enable;
+		if (stage >= 0 && stage <= 1024)
+			sysctl_rescue_stage_enhance = stage;
+		if (frame >= 0 && frame <= 1024)
+			sysctl_rescue_frame_enhance = frame;
+	} else if (sscanf(kbuf, "%d", &enable) == 1) {
+		if (enable == 0 || enable == 1)
+			sysctl_rescue_enable = enable;
+	}
+	return count;
+}
+
+static const struct file_operations ofb_rescue_fops = {
+	.open		= rescue_proc_open,
+	.read		= seq_read,
+	.write		= rescue_proc_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 #define GLOBAL_SYSTEM_UID KUIDT_INIT(1000)
 #define GLOBAL_SYSTEM_GID KGIDT_INIT(1000)
 int frame_ioctl_init(void)
@@ -568,6 +606,10 @@ int frame_ioctl_init(void)
 		goto ERROR_INIT;
 
 	pentry = proc_create("info", S_IRUGO, frame_boost_proc, &ofb_frame_group_info_fops);
+	if (!pentry)
+		goto ERROR_INIT;
+
+	pentry = proc_create("rescue", 0666, frame_boost_proc, &ofb_rescue_fops);
 	if (!pentry)
 		goto ERROR_INIT;
 
