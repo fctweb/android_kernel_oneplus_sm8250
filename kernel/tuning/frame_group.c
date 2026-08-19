@@ -578,6 +578,14 @@ static void clear_all_static_frame_task(struct frame_group *grp)
 		grp->policy_util = 0;
 		grp->curr_util = 0;
 		grp->nr_running = 0;
+		/* Rescue Lite: avoid dangling hrtimer when group becomes empty
+		 * covers SF composition switch (set_sf_thread) and any
+		 * clear_all path that empties the group. */
+		hrtimer_try_to_cancel(&grp->rescue_timer);
+		grp->rescue_active = false;
+		grp->rescue_state = 0;
+		grp->rescue_util = 0;
+		grp->rescue_min_util = 0;
 	}
 }
 
