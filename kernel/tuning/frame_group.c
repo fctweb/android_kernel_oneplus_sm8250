@@ -173,9 +173,12 @@ static enum hrtimer_restart rescue_hrtimer_fn(struct hrtimer *timer)
 		grp->rescue_state |= RESCUE_OF_STAGE;
 		grp->rescue_util = rescue_min;
 		do_kick = true;
-		if (unlikely(sysctl_frame_boost_debug))
-			trace_printk("rescue hrtimer kick grp=%p rescue_min=%u deadline=%llu now=%llu\n",
-				grp, rescue_min, grp->rescue_deadline, now);
+		trace_printk("rescue hrtimer kick grp=%p id=%d rescue_min=%u deadline=%llu now=%llu\n",
+			grp, grp == &sf_composition_group ? 1 : grp == &game_frame_boost_group ? 2 : 0,
+			rescue_min, grp->rescue_deadline, now);
+		val_systrace_c(rescue_min, grp == &sf_composition_group ? "rescue_kick_sf" : "rescue_kick_main");
+		pr_info("[frame_rescue] hrtimer kick grp=%d min=%u deadline=%llu now=%llu\n",
+			grp == &sf_composition_group ? 1 : 0, rescue_min, grp->rescue_deadline, now);
 	}
 out_unlock:
 	raw_spin_unlock_irqrestore(lock, flags);
@@ -217,8 +220,9 @@ static void arm_rescue_timer_locked(struct frame_group *grp)
 	delta_ns = grp->rescue_deadline - grp->window_start;
 	if ((s64)delta_ns <= 0)
 		return;
-	/* cancel any pending before re-arm */
-	hrtimer_cancel(&grp->rescue_timer);
+	/* cancel any pending before re-arm; try_to_cancel avoids deadlock
+	 * because callback takes same grp lock */
+	hrtimer_try_to_cancel(&grp->rescue_timer);
 	grp->rescue_active = false;
 	delay = ns_to_ktime(delta_ns);
 	hrtimer_start(&grp->rescue_timer, delay, HRTIMER_MODE_REL);
@@ -226,13 +230,35 @@ static void arm_rescue_timer_locked(struct frame_group *grp)
 
 static void cancel_rescue_timer_locked(struct frame_group *grp)
 {
-	hrtimer_cancel(&grp->rescue_timer);
+	hrtimer_try_to_cancel(&grp->rescue_timer);
 	grp->rescue_active = false;
+}
+
+static void cancel_all_rescue_timers_locked(void)
+{
+	cancel_rescue_timer_locked(&default_frame_boost_group);
+	cancel_rescue_timer_locked(&sf_composition_group);
+	cancel_rescue_timer_locked(&game_frame_boost_group);
+}
+
+void frame_rescue_cancel_all(void)
+{
+	unsigned long flags;
+	raw_spin_lock_irqsave(&def_fbg_lock, flags);
+	cancel_rescue_timer_locked(&default_frame_boost_group);
+	raw_spin_unlock_irqrestore(&def_fbg_lock, flags);
+	raw_spin_lock_irqsave(&sf_fbg_lock, flags);
+	cancel_rescue_timer_locked(&sf_composition_group);
+	raw_spin_unlock_irqrestore(&sf_fbg_lock, flags);
+	raw_spin_lock_irqsave(&game_fbg_lock, flags);
+	cancel_rescue_timer_locked(&game_frame_boost_group);
+	raw_spin_unlock_irqrestore(&game_fbg_lock, flags);
+	pr_info("[frame_rescue] cancel_all rescue timers\n");
 }
 
 /*********************************
  * frame group common function
- *********************************/
+*********************************/
 /* put "dst " into "src " position */
 static inline void move_list(struct list_head *dst, struct list_head *src)
 {
@@ -592,6 +618,13 @@ void set_ui_thread(int pid, int tid)
 
 	if (grp->ui)
 		clear_all_static_frame_task(grp);
+	if (grp->ui == NULL && grp->render == NULL) {
+		hrtimer_try_to_cancel(&grp->rescue_timer);
+		grp->rescue_active = false;
+		grp->rescue_state = 0;
+		grp->rescue_util = 0;
+		grp->rescue_min_util = 0;
+	}
 
 	if (ui) {
 		grp->ui = ui;
@@ -623,6 +656,13 @@ void set_render_thread(int pid, int tid)
 
 	if (grp->render)
 		remove_task_from_frame_group(grp->render);
+	if (list_empty(&grp->tasks)) {
+		hrtimer_try_to_cancel(&grp->rescue_timer);
+		grp->rescue_active = false;
+		grp->rescue_state = 0;
+		grp->rescue_util = 0;
+		grp->rescue_min_util = 0;
+	}
 
 	if (render) {
 		grp->render = render;
@@ -1103,6 +1143,8 @@ EXPORT_SYMBOL_GPL(rollover_frame_group_window);
 static void update_frame_zone(struct frame_group *grp, u64 wallclock)
 {
 	s64 delta;
+	bool was_in_frame;
+	was_in_frame = !!(grp->frame_zone & FRAME_ZONE);
 
 	grp->frame_zone = 0;
 
@@ -1113,8 +1155,16 @@ static void update_frame_zone(struct frame_group *grp, u64 wallclock)
 	if (sysctl_slide_boost_enabled || sysctl_input_boost_enabled)
 		grp->frame_zone |= USER_ZONE;
 
-	if (!grp->frame_zone)
+	if (!grp->frame_zone) {
 		set_frame_state(FRAME_END);
+		if (was_in_frame) {
+			hrtimer_try_to_cancel(&grp->rescue_timer);
+			grp->rescue_active = false;
+			grp->rescue_state = 0;
+			grp->rescue_util = 0;
+			grp->rescue_min_util = 0;
+		}
+	}
 
 	if (unlikely(sysctl_frame_boost_debug)) {
 		if (grp == &sf_composition_group)

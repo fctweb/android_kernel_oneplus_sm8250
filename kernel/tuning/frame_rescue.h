@@ -17,6 +17,7 @@ extern int sysctl_rescue_stage_enhance;
 extern int sysctl_rescue_frame_enhance;
 
 void frame_rescue_init(void);
+void frame_rescue_cancel_all(void);
 int frame_rescue_proc_show(struct seq_file *m, void *v);
 
 #endif /* _FRAME_RESCUE_H */

@@ -553,22 +553,31 @@ static ssize_t rescue_proc_write(struct file *file, const char __user *buf,
 {
 	char kbuf[64];
 	int enable, stage, frame;
+	bool need_cancel = false;
 	if (count >= sizeof(kbuf))
 		return -EINVAL;
 	if (copy_from_user(kbuf, buf, count))
 		return -EFAULT;
 	kbuf[count] = '\0';
 	if (sscanf(kbuf, "%d %d %d", &enable, &stage, &frame) == 3) {
-		if (enable == 0 || enable == 1)
+		if (enable == 0 || enable == 1) {
+			if (enable == 0 && sysctl_rescue_enable == 1)
+				need_cancel = true;
 			sysctl_rescue_enable = enable;
+		}
 		if (stage >= 0 && stage <= 1024)
 			sysctl_rescue_stage_enhance = stage;
 		if (frame >= 0 && frame <= 1024)
 			sysctl_rescue_frame_enhance = frame;
 	} else if (sscanf(kbuf, "%d", &enable) == 1) {
-		if (enable == 0 || enable == 1)
+		if (enable == 0 || enable == 1) {
+			if (enable == 0 && sysctl_rescue_enable == 1)
+				need_cancel = true;
 			sysctl_rescue_enable = enable;
+		}
 	}
+	if (need_cancel)
+		frame_rescue_cancel_all();
 	return count;
 }
 
