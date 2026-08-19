@@ -30,6 +30,9 @@
 #include <linux/sched_assist/sched_assist_common.h>
 #include <linux/cpufreq.h>
 #endif /* OPLUS_FEATURE_SCHED_ASSIST */
+#ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
+#include <linux/sched_assist/sa_pipeline_lite.h>
+#endif
 
 #ifdef OPLUS_FEATURE_SCHED_ASSIST
 #include <linux/special_opt/special_opt.h>
@@ -8394,6 +8397,17 @@ oplus_done:
 	if (!fbt_env.fastpath)
 		set_ux_task_to_prefer_cpu(p, &best_energy_cpu);
 #endif /* OPLUS_FEATURE_SCHED_ASSIST */
+#ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
+	{
+		int _plc = oplus_get_task_pipeline_cpu(p);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
+		if (_plc >= 0 && cpu_online(_plc) && cpumask_test_cpu(_plc, p->cpus_ptr))
+#else
+		if (_plc >= 0 && cpu_online(_plc) && cpumask_test_cpu(_plc, &p->cpus_allowed))
+#endif
+			best_energy_cpu = _plc;
+	}
+#endif
 #ifdef OPLUS_FEATURE_SCHED_ASSIST
 	if (sched_assist_scene(SA_SLIDE) && is_heavy_ux_task(p) &&
 		ux_task_misfit(p, best_energy_cpu)) {

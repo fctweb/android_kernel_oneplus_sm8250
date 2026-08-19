@@ -1690,6 +1690,7 @@ struct task_struct {
 	int fbg_depth;
 	bool fbg_running; /* task belongs to a group, and in running */
 	int preferred_cluster_id;
+	int pipeline_cpu;
 #endif
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_FDLEAK_CHECK)
 	unsigned int fdleak_flag;

@@ -16,6 +16,7 @@
 #include <linux/thread_info.h>
 
 #include "sched_assist_common.h"
+#include "sa_pipeline_lite.h"
 #include "sched_assist_slide.h"
 #ifdef CONFIG_MMAP_LOCK_OPT
 #include <linux/mm.h>
@@ -1611,6 +1612,9 @@ bool should_ux_task_skip_cpu(struct task_struct *task, unsigned int cpu)
 			return true;
 	}
 
+	if (oplus_pipeline_task_skip_cpu(task, cpu))
+		return true;
+
 	return false;
 }
 
@@ -2936,6 +2940,7 @@ static int __init oplus_sched_assist_init(void)
 
 #endif
 
+	sa_pipeline_lite_init();
 	return 0;
 
 #ifdef CONFIG_OPLUS_UX_IM_FLAG
