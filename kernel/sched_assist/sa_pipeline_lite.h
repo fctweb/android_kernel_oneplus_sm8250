@@ -18,5 +18,6 @@ struct task_struct *oplus_pipeline_get_prime_task(void);
 bool oplus_pipeline_task_skip_cpu(struct task_struct *task, unsigned int dst_cpu);
 bool oplus_is_pipeline_scene(void);
 void sa_pipeline_lite_init(void);
+void qcom_rearrange_pipeline_preferred_cpus(unsigned int divisor);
 
 #endif
