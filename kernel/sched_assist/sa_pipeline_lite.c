@@ -184,10 +184,22 @@ void qcom_rearrange_pipeline_preferred_cpus(unsigned int divisor)
 		if (max_util >= prime_util * (unsigned int)amplification_coef / 100 &&
 		    max_util >= prime_util + PIPELINE_MIGRATE_UTIL_DIFF) {
 			if (pipeline_prime_rearrange == 1) {
+				int prime_idx = -1, max_idx = -1;
+				for (i = 0; i < MAX_PIPELINE_TASK_NUM; i++) {
+					if (pipeline_task[i] == prime_task)
+						prime_idx = i;
+					if (pipeline_task[i] == max_util_task)
+						max_idx = i;
+				}
 				int old_cpu = READ_ONCE(prime_task->pipeline_cpu);
 				int new_cpu = READ_ONCE(max_util_task->pipeline_cpu);
 				WRITE_ONCE(prime_task->pipeline_cpu, new_cpu);
 				WRITE_ONCE(max_util_task->pipeline_cpu, nr_cpu_ids - 1);
+				if (prime_idx >= 0 && max_idx >= 0) {
+					int tmp = pipeline_cpus[prime_idx];
+					pipeline_cpus[prime_idx] = pipeline_cpus[max_idx];
+					pipeline_cpus[max_idx] = tmp;
+				}
 				prime_task = max_util_task;
 				prime_tgid = prime_task->tgid;
 				pr_info("[pipeline_lite] swap prime -> %s pid=%d util %u > %u (old_cpu %d)\n",
