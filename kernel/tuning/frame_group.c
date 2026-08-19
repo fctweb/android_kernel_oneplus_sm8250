@@ -11,6 +11,8 @@
 #include <../drivers/android/binder_internal.h>
 #include <../kernel/sched/sched.h>
 #include <linux/reciprocal_div.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
 
 #include <trace/events/sched.h>
 #include <trace/events/task.h>
@@ -105,6 +107,9 @@ struct frame_group {
 	u64 rescue_deadline;
 	unsigned int rescue_state;
 	unsigned long rescue_util;
+	struct hrtimer rescue_timer;
+	bool rescue_active;
+	unsigned int rescue_min_util;
 };
 
 static DEFINE_RAW_SPINLOCK(def_fbg_lock);
@@ -125,6 +130,105 @@ __read_mostly int fbg_num_sched_clusters;
 struct list_head fbg_cluster_head;
 #define for_each_sched_fbg_cluster(cluster) \
 	list_for_each_entry_rcu(cluster, &fbg_cluster_head, list)
+
+/* forward decls for rescue hrtimer kick (defined later) */
+static inline void cpufreq_update_util_wrap(struct rq *rq, unsigned int flags);
+bool default_group_update_cpufreq(void);
+u64 fbg_ktime_get_ns(void);
+
+static inline raw_spinlock_t *rescue_lock_for_grp(struct frame_group *grp)
+{
+	if (grp == &sf_composition_group)
+		return &sf_fbg_lock;
+	if (grp == &game_frame_boost_group)
+		return &game_fbg_lock;
+	return &def_fbg_lock;
+}
+
+static enum hrtimer_restart rescue_hrtimer_fn(struct hrtimer *timer)
+{
+	struct frame_group *grp = container_of(timer, struct frame_group, rescue_timer);
+	raw_spinlock_t *lock = rescue_lock_for_grp(grp);
+	unsigned long flags;
+	bool do_kick = false;
+	u64 now;
+
+	now = fbg_ktime_get_ns();
+	raw_spin_lock_irqsave(lock, flags);
+	if (!sysctl_rescue_enable)
+		goto out_unlock;
+	if (!(grp->frame_zone & FRAME_ZONE))
+		goto out_unlock;
+	if (!grp->rescue_deadline)
+		goto out_unlock;
+	if (now < grp->rescue_deadline)
+		goto out_unlock;
+	/* still in same window and rescue not yet active */
+	if (!grp->rescue_active) {
+		unsigned int rescue_min = (grp == &sf_composition_group) ?
+			(unsigned int)sysctl_rescue_frame_enhance :
+			(unsigned int)sysctl_rescue_stage_enhance;
+		grp->rescue_active = true;
+		grp->rescue_min_util = rescue_min;
+		grp->rescue_state |= RESCUE_OF_STAGE;
+		grp->rescue_util = rescue_min;
+		do_kick = true;
+		if (unlikely(sysctl_frame_boost_debug))
+			trace_printk("rescue hrtimer kick grp=%p rescue_min=%u deadline=%llu now=%llu\n",
+				grp, rescue_min, grp->rescue_deadline, now);
+	}
+out_unlock:
+	raw_spin_unlock_irqrestore(lock, flags);
+	if (do_kick) {
+		if (grp == &sf_composition_group) {
+			/* SF group: kick SF cluster cpus if known, else default path */
+			struct oplus_sched_cluster *c;
+			bool kicked = false;
+			rcu_read_lock();
+			for_each_sched_fbg_cluster(c) {
+				if (grp->preferred_cluster && c != grp->preferred_cluster)
+					continue;
+				if (c && !cpumask_empty(&c->cpus)) {
+					int cpu = cpumask_first(&c->cpus);
+					cpufreq_update_util_wrap(cpu_rq(cpu), SCHED_CPUFREQ_SF_FRAMEBOOST);
+					kicked = true;
+					break;
+				}
+			}
+			rcu_read_unlock();
+			if (!kicked)
+				default_group_update_cpufreq();
+		} else {
+			default_group_update_cpufreq();
+		}
+	}
+	return HRTIMER_NORESTART;
+}
+
+static void arm_rescue_timer_locked(struct frame_group *grp)
+{
+	ktime_t delay;
+	u64 delta_ns;
+
+	if (!sysctl_rescue_enable)
+		return;
+	if (!grp->rescue_deadline)
+		return;
+	delta_ns = grp->rescue_deadline - grp->window_start;
+	if ((s64)delta_ns <= 0)
+		return;
+	/* cancel any pending before re-arm */
+	hrtimer_cancel(&grp->rescue_timer);
+	grp->rescue_active = false;
+	delay = ns_to_ktime(delta_ns);
+	hrtimer_start(&grp->rescue_timer, delay, HRTIMER_MODE_REL);
+}
+
+static void cancel_rescue_timer_locked(struct frame_group *grp)
+{
+	hrtimer_cancel(&grp->rescue_timer);
+	grp->rescue_active = false;
+}
 
 /*********************************
  * frame group common function
@@ -902,8 +1006,11 @@ static s64 update_window_start(u64 wallclock, struct frame_group *grp, int group
 	grp->prev_window_size = grp->window_size;
 	grp->rescue_deadline = wallclock + ((grp->window_size * 614) >> 10);
 	grp->rescue_state = 0;
+	grp->rescue_active = false;
 	grp->rescue_util = 0;
 	grp->window_busy = (grp->curr_window_exec * 100) / delta;
+	/* re-arm rescue hrtimer for new window */
+	arm_rescue_timer_locked(grp);
 
 	if (unlikely(sysctl_frame_boost_debug)) {
 		static unsigned long main_count, sf_count;
@@ -1193,19 +1300,26 @@ static unsigned long update_freq_policy_util(struct frame_group *grp, u64 wallcl
 	}
 
 	/* Rescue Lite: if past 60% window and still in frame_zone, boost */
-	if (sysctl_rescue_enable && (grp->frame_zone & FRAME_ZONE) && grp->rescue_deadline && wallclock > grp->rescue_deadline) {
-		unsigned long enhance = (grp == &sf_composition_group) ? (unsigned long)sysctl_rescue_frame_enhance : (unsigned long)sysctl_rescue_stage_enhance;
-		unsigned long boosted = frame_util + ((frame_util * enhance) >> 10);
-		if (boosted > frame_util) {
+	/* Rescue Lite: min-util clamp, not additive enhance.
+	 * hrtimer sets rescue_active/min_util at ~60% window; here we
+	 * clamp frame_util to at least rescue_min_util to avoid double-
+	 * boost on top of frame_vutil parabola.
+	 */
+	if (sysctl_rescue_enable && (grp->frame_zone & FRAME_ZONE) && grp->rescue_active) {
+		unsigned long clamped = max_t(unsigned long, frame_util, (unsigned long)grp->rescue_min_util);
+		if (clamped != frame_util) {
+			grp->rescue_util = clamped;
 			grp->rescue_state |= RESCUE_OF_STAGE;
-			grp->rescue_util = boosted;
-			frame_util = boosted;
+			frame_util = clamped;
 			if (unlikely(sysctl_frame_boost_debug))
-				trace_printk("rescue boosted %lu -> %lu enhance %lu deadline %llu wall %llu\n", grp->curr_util, boosted, enhance, grp->rescue_deadline, wallclock);
+				trace_printk("rescue clamp %lu -> %lu min=%u deadline %llu wall %llu\n",
+					clamped, frame_util, grp->rescue_min_util, grp->rescue_deadline, wallclock);
 		}
-	} else if (!sysctl_rescue_enable || !(grp->frame_zone & FRAME_ZONE)) {
+	} else if ((!sysctl_rescue_enable || !(grp->frame_zone & FRAME_ZONE)) && (grp->rescue_state || grp->rescue_util || grp->rescue_active)) {
 		grp->rescue_state = 0;
 		grp->rescue_util = 0;
+		grp->rescue_active = false;
+		grp->rescue_min_util = 0;
 	}
 
 	return frame_uclamp(frame_util);
@@ -2368,6 +2482,10 @@ int frame_group_init(void)
 	grp->rescue_deadline = 0;
 	grp->rescue_state = 0;
 	grp->rescue_util = 0;
+	grp->rescue_active = false;
+	grp->rescue_min_util = 0;
+	hrtimer_init(&grp->rescue_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	grp->rescue_timer.function = rescue_hrtimer_fn;
 
 	/* Sf composition group initialization */
 	grp = &sf_composition_group;
@@ -2381,6 +2499,10 @@ int frame_group_init(void)
 	grp->rescue_deadline = 0;
 	grp->rescue_state = 0;
 	grp->rescue_util = 0;
+	grp->rescue_active = false;
+	grp->rescue_min_util = 0;
+	hrtimer_init(&grp->rescue_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	grp->rescue_timer.function = rescue_hrtimer_fn;
 
 	/* Game frame group initialization */
 	grp = &game_frame_boost_group;
@@ -2394,6 +2516,10 @@ int frame_group_init(void)
 	grp->rescue_deadline = 0;
 	grp->rescue_state = 0;
 	grp->rescue_util = 0;
+	grp->rescue_active = false;
+	grp->rescue_min_util = 0;
+	hrtimer_init(&grp->rescue_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	grp->rescue_timer.function = rescue_hrtimer_fn;
 
 	schedtune_spc_rdiv = reciprocal_value(100);
 	frame_rescue_init();
