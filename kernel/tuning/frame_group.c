@@ -28,6 +28,7 @@ extern int sysctl_slide_boost_enabled;
 extern int sysctl_input_boost_enabled;
 
 #include "frame_boost.h"
+#include "frame_rescue.h"
 #include "cluster_boost.h"
 #include "frame_debug.h"
 
@@ -99,6 +100,11 @@ struct frame_group {
 	/* Util used to adjust cpu frequency */
 	unsigned long policy_util;
 	unsigned long curr_util;
+
+	/* Rescue Lite: per-window deadline + cached boost */
+	u64 rescue_deadline;
+	unsigned int rescue_state;
+	unsigned long rescue_util;
 };
 
 static DEFINE_RAW_SPINLOCK(def_fbg_lock);
@@ -894,6 +900,9 @@ static s64 update_window_start(u64 wallclock, struct frame_group *grp, int group
 
 	grp->window_start = wallclock;
 	grp->prev_window_size = grp->window_size;
+	grp->rescue_deadline = wallclock + ((grp->window_size * 614) >> 10);
+	grp->rescue_state = 0;
+	grp->rescue_util = 0;
 	grp->window_busy = (grp->curr_window_exec * 100) / delta;
 
 	if (unlikely(sysctl_frame_boost_debug)) {
@@ -1181,6 +1190,22 @@ static unsigned long update_freq_policy_util(struct frame_group *grp, u64 wallcl
 			flags, wallclock, grp->window_start, timeline, prev_putil, curr_putil,
 			get_frame_putil(grp->curr_window_exec, grp->frame_zone), vutil,
 			use_vutil, grp == &sf_composition_group);
+	}
+
+	/* Rescue Lite: if past 60% window and still in frame_zone, boost */
+	if (sysctl_rescue_enable && (grp->frame_zone & FRAME_ZONE) && grp->rescue_deadline && wallclock > grp->rescue_deadline) {
+		unsigned long enhance = (grp == &sf_composition_group) ? (unsigned long)sysctl_rescue_frame_enhance : (unsigned long)sysctl_rescue_stage_enhance;
+		unsigned long boosted = frame_util + ((frame_util * enhance) >> 10);
+		if (boosted > frame_util) {
+			grp->rescue_state |= RESCUE_OF_STAGE;
+			grp->rescue_util = boosted;
+			frame_util = boosted;
+			if (unlikely(sysctl_frame_boost_debug))
+				trace_printk("rescue boosted %lu -> %lu enhance %lu deadline %llu wall %llu\n", grp->curr_util, boosted, enhance, grp->rescue_deadline, wallclock);
+		}
+	} else if (!sysctl_rescue_enable || !(grp->frame_zone & FRAME_ZONE)) {
+		grp->rescue_state = 0;
+		grp->rescue_util = 0;
 	}
 
 	return frame_uclamp(frame_util);
@@ -2259,6 +2284,7 @@ void fbg_sched_fork_hook(void *unused, struct task_struct *tsk)
 	tsk->fbg_depth = INVALID_FBG_DEPTH;
 	tsk->fbg_running = false;
 	tsk->preferred_cluster_id = -1;
+	tsk->pipeline_cpu = -1;
 	INIT_LIST_HEAD(&tsk->fbg_list);
 }
 
@@ -2339,6 +2365,9 @@ int frame_group_init(void)
 	grp->mark_start = 0;
 	grp->preferred_cluster = NULL;
 	grp->available_cluster = NULL;
+	grp->rescue_deadline = 0;
+	grp->rescue_state = 0;
+	grp->rescue_util = 0;
 
 	/* Sf composition group initialization */
 	grp = &sf_composition_group;
@@ -2349,6 +2378,9 @@ int frame_group_init(void)
 	grp->mark_start = 0;
 	grp->preferred_cluster = NULL;
 	grp->available_cluster = NULL;
+	grp->rescue_deadline = 0;
+	grp->rescue_state = 0;
+	grp->rescue_util = 0;
 
 	/* Game frame group initialization */
 	grp = &game_frame_boost_group;
@@ -2359,8 +2391,12 @@ int frame_group_init(void)
 	grp->mark_start = 0;
 	grp->preferred_cluster = NULL;
 	grp->available_cluster = NULL;
+	grp->rescue_deadline = 0;
+	grp->rescue_state = 0;
+	grp->rescue_util = 0;
 
 	schedtune_spc_rdiv = reciprocal_value(100);
+	frame_rescue_init();
 
 	if (!build_clusters()) {
 		ret = -1;
