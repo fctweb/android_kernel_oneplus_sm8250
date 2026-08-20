@@ -242,11 +242,21 @@ static void cancel_rescue_timer_locked(struct frame_group *grp)
 	grp->rescue_active = false;
 }
 
-static void cancel_all_rescue_timers_locked(void)
+static void __maybe_unused cancel_all_rescue_timers_locked(void)
 {
 	cancel_rescue_timer_locked(&default_frame_boost_group);
 	cancel_rescue_timer_locked(&sf_composition_group);
 	cancel_rescue_timer_locked(&game_frame_boost_group);
+}
+
+static void reset_rescue_locked(struct frame_group *grp)
+{
+	hrtimer_try_to_cancel(&grp->rescue_timer);
+	grp->rescue_active = false;
+	grp->rescue_state = 0;
+	grp->rescue_util = 0;
+	grp->rescue_min_util = 0;
+	grp->rescue_deadline = 0;
 }
 
 void frame_rescue_cancel_all(void)
@@ -501,8 +511,18 @@ static void fbg_resume(void)
 
 static int fbg_suspend(void)
 {
+	unsigned long flags;
 	ktime_last = ktime_get();
 	fbg_ktime_suspended = true;
+	raw_spin_lock_irqsave(&def_fbg_lock, flags);
+	reset_rescue_locked(&default_frame_boost_group);
+	raw_spin_unlock_irqrestore(&def_fbg_lock, flags);
+	raw_spin_lock_irqsave(&sf_fbg_lock, flags);
+	reset_rescue_locked(&sf_composition_group);
+	raw_spin_unlock_irqrestore(&sf_fbg_lock, flags);
+	raw_spin_lock_irqsave(&game_fbg_lock, flags);
+	reset_rescue_locked(&game_frame_boost_group);
+	raw_spin_unlock_irqrestore(&game_fbg_lock, flags);
 	return 0;
 }
 

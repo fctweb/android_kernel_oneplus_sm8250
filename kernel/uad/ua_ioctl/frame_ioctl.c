@@ -618,7 +618,7 @@ int frame_ioctl_init(void)
 	if (!pentry)
 		goto ERROR_INIT;
 
-	pentry = proc_create("rescue", 0666, frame_boost_proc, &ofb_rescue_fops);
+	pentry = proc_create("rescue", 0644, frame_boost_proc, &ofb_rescue_fops);
 	if (!pentry)
 		goto ERROR_INIT;
 
