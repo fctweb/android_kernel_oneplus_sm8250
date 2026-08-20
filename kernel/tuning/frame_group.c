@@ -132,6 +132,7 @@ struct list_head fbg_cluster_head;
 	list_for_each_entry_rcu(cluster, &fbg_cluster_head, list)
 
 /* forward decls for rescue hrtimer kick (defined later) */
+static unsigned long update_freq_policy_util(struct frame_group *grp, u64 wallclock, unsigned int flags);
 static inline void cpufreq_update_util_wrap(struct rq *rq, unsigned int flags);
 bool default_group_update_cpufreq(void);
 u64 fbg_ktime_get_ns(void);
@@ -172,6 +173,11 @@ static enum hrtimer_restart rescue_hrtimer_fn(struct hrtimer *timer)
 		grp->rescue_min_util = rescue_min;
 		grp->rescue_state |= RESCUE_OF_STAGE;
 		grp->rescue_util = rescue_min;
+		/* refresh policy_util under same lock so cpufreq kick sees rescue floor */
+		if (grp == &sf_composition_group)
+			grp->policy_util = update_freq_policy_util(grp, now, SCHED_CPUFREQ_SF_FRAMEBOOST);
+		else
+			grp->policy_util = update_freq_policy_util(grp, now, SCHED_CPUFREQ_DEF_FRAMEBOOST);
 		do_kick = true;
 		trace_printk("rescue hrtimer kick grp=%p id=%d rescue_min=%u deadline=%llu now=%llu\n",
 			grp, grp == &sf_composition_group ? 1 : grp == &game_frame_boost_group ? 2 : 0,
