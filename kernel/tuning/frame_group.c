@@ -179,12 +179,14 @@ static enum hrtimer_restart rescue_hrtimer_fn(struct hrtimer *timer)
 		else
 			grp->policy_util = update_freq_policy_util(grp, now, SCHED_CPUFREQ_DEF_FRAMEBOOST);
 		do_kick = true;
-		trace_printk("rescue hrtimer kick grp=%p id=%d rescue_min=%u deadline=%llu now=%llu\n",
-			grp, grp == &sf_composition_group ? 1 : grp == &game_frame_boost_group ? 2 : 0,
-			rescue_min, grp->rescue_deadline, now);
-		val_systrace_c(rescue_min, grp == &sf_composition_group ? "rescue_kick_sf" : "rescue_kick_main");
-		pr_info("[frame_rescue] hrtimer kick grp=%d min=%u deadline=%llu now=%llu\n",
-			grp == &sf_composition_group ? 1 : 0, rescue_min, grp->rescue_deadline, now);
+		if (unlikely(sysctl_frame_boost_debug)) {
+			trace_printk("rescue hrtimer kick grp=%p id=%d rescue_min=%u deadline=%llu now=%llu\n",
+				grp, grp == &sf_composition_group ? 1 : grp == &game_frame_boost_group ? 2 : 0,
+				rescue_min, grp->rescue_deadline, now);
+			val_systrace_c(rescue_min, grp == &sf_composition_group ? "rescue_kick_sf" : "rescue_kick_main");
+			pr_info("[frame_rescue] hrtimer kick grp=%d min=%u deadline=%llu now=%llu\n",
+				grp == &sf_composition_group ? 1 : 0, rescue_min, grp->rescue_deadline, now);
+		}
 	}
 out_unlock:
 	raw_spin_unlock_irqrestore(lock, flags);
@@ -259,7 +261,8 @@ void frame_rescue_cancel_all(void)
 	raw_spin_lock_irqsave(&game_fbg_lock, flags);
 	cancel_rescue_timer_locked(&game_frame_boost_group);
 	raw_spin_unlock_irqrestore(&game_fbg_lock, flags);
-	pr_info("[frame_rescue] cancel_all rescue timers\n");
+	if (unlikely(sysctl_frame_boost_debug))
+		pr_info("[frame_rescue] cancel_all rescue timers\n");
 }
 
 /*********************************
