@@ -248,8 +248,16 @@ EXPORT_SYMBOL_GPL(oplus_pipeline_task_skip_cpu);
 
 static void pipeline_set_locked(int idx, struct task_struct *tsk, int cpu)
 {
-	if (pipeline_task[idx]) {
-		put_task_struct(pipeline_task[idx]);
+	struct task_struct *old = pipeline_task[idx];
+	if (old) {
+		/* clear only bits that Pipeline Lite itself added */
+		if ((old->ux_state & SCHED_ASSIST_UX_PRIORITY_MASK) == UX_PRIORITY_PIPELINE) {
+			old->ux_state = (old->ux_state & ~SCHED_ASSIST_UX_PRIORITY_MASK) & ~SA_TYPE_HEAVY;
+		} else if ((old->ux_state & SCHED_ASSIST_UX_PRIORITY_MASK) == UX_PRIORITY_PIPELINE_UI) {
+			old->ux_state = (old->ux_state & ~SCHED_ASSIST_UX_PRIORITY_MASK) & ~SA_TYPE_LIGHT;
+		}
+		WRITE_ONCE(old->pipeline_cpu, -1);
+		put_task_struct(old);
 		pipeline_task[idx] = NULL;
 	}
 	if (tsk) {
