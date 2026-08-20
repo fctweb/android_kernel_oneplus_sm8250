@@ -349,7 +349,7 @@ static ssize_t pipeline_proc_write(struct file *file, const char __user *buf,
 		if (cpu == nr_cpu_ids - 1 && !prime_task) {
 			prime_task = tsk;
 			prime_tgid = tsk->tgid;
-			get_task_struct(prime_task);
+			/* alias to pipeline_task[idx] ref, no extra get */
 		}
 		put_task_struct(tsk);
 		idx++;
@@ -359,7 +359,7 @@ static ssize_t pipeline_proc_write(struct file *file, const char __user *buf,
 	if (!prime_task && pipeline_task[0]) {
 		prime_task = pipeline_task[0];
 		prime_tgid = prime_task->tgid;
-		get_task_struct(prime_task);
+		/* alias, no extra get */
 		WRITE_ONCE(prime_task->pipeline_cpu, nr_cpu_ids - 1);
 		pipeline_cpus[0] = nr_cpu_ids - 1;
 	}
