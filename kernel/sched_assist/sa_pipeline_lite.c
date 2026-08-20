@@ -21,6 +21,7 @@
 #include <../kernel/sched/walt.h>
 #endif
 extern int sysctl_sched_assist_enabled;
+extern int sysctl_frame_boost_debug;
 #include "sched_assist_common.h"
 #include "sa_pipeline_lite.h"
 
@@ -185,14 +186,15 @@ void qcom_rearrange_pipeline_preferred_cpus(unsigned int divisor)
 		    max_util >= prime_util + PIPELINE_MIGRATE_UTIL_DIFF) {
 			if (pipeline_prime_rearrange == 1) {
 				int prime_idx = -1, max_idx = -1;
+				int old_cpu, new_cpu;
 				for (i = 0; i < MAX_PIPELINE_TASK_NUM; i++) {
 					if (pipeline_task[i] == prime_task)
 						prime_idx = i;
 					if (pipeline_task[i] == max_util_task)
 						max_idx = i;
 				}
-				int old_cpu = READ_ONCE(prime_task->pipeline_cpu);
-				int new_cpu = READ_ONCE(max_util_task->pipeline_cpu);
+				old_cpu = READ_ONCE(prime_task->pipeline_cpu);
+				new_cpu = READ_ONCE(max_util_task->pipeline_cpu);
 				WRITE_ONCE(prime_task->pipeline_cpu, new_cpu);
 				WRITE_ONCE(max_util_task->pipeline_cpu, nr_cpu_ids - 1);
 				if (prime_idx >= 0 && max_idx >= 0) {
@@ -202,8 +204,9 @@ void qcom_rearrange_pipeline_preferred_cpus(unsigned int divisor)
 				}
 				prime_task = max_util_task;
 				prime_tgid = prime_task->tgid;
-				pr_info("[pipeline_lite] swap prime -> %s pid=%d util %u > %u (old_cpu %d)\n",
-					prime_task->comm, prime_task->pid, max_util, prime_util, old_cpu);
+				if (unlikely(sysctl_frame_boost_debug))
+					pr_info("[pipeline_lite] swap prime -> %s pid=%d util %u > %u (old_cpu %d)\n",
+						prime_task->comm, prime_task->pid, max_util, prime_util, old_cpu);
 			}
 		}
 	}
@@ -214,7 +217,8 @@ EXPORT_SYMBOL_GPL(qcom_rearrange_pipeline_preferred_cpus);
 static void pipeline_rearrange_work_fn(struct work_struct *work)
 {
 	qcom_rearrange_pipeline_preferred_cpus(1);
-	schedule_delayed_work(&pipeline_rearrange_work, msecs_to_jiffies(20));
+	if (READ_ONCE(pipeline_task_nr) >= 2 && READ_ONCE(pipeline_prime_rearrange) > 0)
+		schedule_delayed_work(&pipeline_rearrange_work, msecs_to_jiffies(20));
 }
 #endif
 
@@ -313,6 +317,7 @@ static ssize_t pipeline_proc_write(struct file *file, const char __user *buf,
 		walt_windown_cnt = 0;
 #endif
 		raw_spin_unlock_irqrestore(&pipeline_lock, flags);
+		cancel_delayed_work(&pipeline_rearrange_work);
 		return count;
 	}
 
@@ -372,8 +377,15 @@ static ssize_t pipeline_proc_write(struct file *file, const char __user *buf,
 		pipeline_cpus[0] = nr_cpu_ids - 1;
 	}
 	raw_spin_unlock_irqrestore(&pipeline_lock, flags);
+	if (pipeline_task_nr >= 2 && pipeline_prime_rearrange > 0) {
+		if (!delayed_work_pending(&pipeline_rearrange_work))
+			schedule_delayed_work(&pipeline_rearrange_work, msecs_to_jiffies(20));
+	} else {
+		cancel_delayed_work(&pipeline_rearrange_work);
+	}
 
-	pr_info("[pipeline_lite] set nr=%u prime=%s pid=%d cpu=%d\n",
+	if (unlikely(sysctl_frame_boost_debug))
+		pr_info("[pipeline_lite] set nr=%u prime=%s pid=%d cpu=%d\n",
 		pipeline_task_nr, prime_task ? prime_task->comm : "none",
 		prime_task ? prime_task->pid : -1,
 		prime_task ? READ_ONCE(prime_task->pipeline_cpu) : -1);
@@ -459,12 +471,12 @@ static const struct file_operations prime_rearrange_fops = {
 
 void sa_pipeline_lite_init(void)
 {
-	if (!proc_create("pipeline_lite", 0666, NULL, &pipeline_fops))
+	if (!proc_create("pipeline_lite", 0644, NULL, &pipeline_fops))
 		pr_err("[pipeline_lite] failed to create proc\n");
 	else
 		pr_info("[pipeline_lite] init nr_cpu_ids=%d\n", nr_cpu_ids);
 #if IS_ENABLED(CONFIG_SCHED_WALT)
-	proc_create("pipeline_prime_rearrange", 0666, NULL, &prime_rearrange_fops);
+	proc_create("pipeline_prime_rearrange", 0644, NULL, &prime_rearrange_fops);
 	INIT_DELAYED_WORK(&pipeline_rearrange_work, pipeline_rearrange_work_fn);
 	schedule_delayed_work(&pipeline_rearrange_work, msecs_to_jiffies(200));
 	pr_info("[pipeline_lite] rearrange enabled amp=%d cnt=%d\n", amplification_coef, coloc_demand_cnt);
