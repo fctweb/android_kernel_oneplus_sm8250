@@ -1,0 +1,221 @@
+# =============================================================================
+# Build OP8T (kebab, KB2000) SUSFS kernel from the stock ColorOS 15 base
+# Repository : fctweb/android_kernel_oneplus_sm8250  (branch: op8t)
+# Output     : AnyKernel3 flashable zip (Image + dtb + dtbo.img + AK3)
+#
+# Integration decision (all facts verified against upstream on 2026-08-28):
+#   * SukiSU-Ultra (INCLUDING its `susfs_new` branch) ships NO kernel-side
+#     KSU_SUSFS: `kernel/Kconfig` in every branch only has KSU/KSU_DEBUG/
+#     KSU_MANUAL_SU/KPM/KSU_DISABLE_*; there is no fs/susfs.c, no glue symbols.
+#     Its susfs support is manager-UI only. So the user's original plan
+#     (SukiSU-Ultra susfs_new + KSU_SUSFS) cannot build a SUSFS kernel.
+#   * This tree ALREADY contains the complete susfs v1.5.5 NON-GKI patch set
+#     (fs/susfs.c, include/linux/susfs.h, include/linux/susfs_def.h,
+#     fs/Makefile `obj-$(CONFIG_KSU_SUSFS) += susfs.o`, VFS hooks in
+#     fs/readdir.c fs/stat.c fs/namei.c fs/dcache.c fs/namespace.c
+#     fs/proc/cmdline.c fs/proc/task_mmu.c kernel/sys.c, task_struct fields in
+#     include/linux/sched.h). It only lacks the KSU side glue.
+#   * The KSU side that matches this v1.5.5 susfs exactly (4-arg
+#     `ksu_try_umount`, `susfs_is_current_ksu_domain/zygote_domain`,
+#     `susfs_init()`, `susfs_try_umount_all(uid)`, KSU_SUSFS Kconfig menu) is
+#     re-noroi/KernelSU-Next branch `susfs` — the same stack the FakeDreamer
+#     4.19 sm8250 kernel (re-noroi/kernel_sm8250 `next-susfs`) ships in
+#     production (nextpatch.sh: curl .../susfs/kernel/setup.sh | bash -s susfs).
+#     It uses manual/LSM hooks, so CONFIG_KPROBES is NOT required.
+#   * KernelSU-Next upstream branch `next` (used by the original op8t.sh) and
+#     its `next-susfs-4.19` tag were deleted upstream; rifsxd/KernelSU-Next
+#     no longer carries that code. re-noroi's fork is the maintained line.
+#
+# The clang toolchain (ZyCromerZ Clang-10.0.1-20220724, 381 MB) is the exact
+# one op8t.sh uses and was verified working on this base.
+# =============================================================================
+name: Build OP8T (kebab) SUSFS Kernel - AnyKernel3 zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_ref:
+        description: >-
+          re-noroi/KernelSU-Next ref to integrate (must be on the susfs line).
+          Leave default unless you know what you are doing.
+        required: false
+        default: 'susfs'
+      clean_build:
+        description: 'Delete out/ before configuring (full rebuild)'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: [op8t]
+    paths:
+      - '.github/workflows/build-susfs.yml'
+
+permissions:
+  contents: read
+
+env:
+  KERNEL_DEFCONFIG: vendor/kona-perf_defconfig
+  # Same one-liner FakeDreamer uses for its 4.19 sm8250 susfs kernel
+  KSU_SETUP_URL: https://raw.githubusercontent.com/re-noroi/KernelSU-Next/susfs/kernel/setup.sh
+
+jobs:
+  build:
+    name: Build kebab SUSFS kernel (4.19, ColorOS15 base)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Checkout kernel (op8t branch)
+        uses: actions/checkout@v4
+        with:
+          ref: op8t
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev device-tree-compiler \
+            lz4 zstd xz-utils cpio zip unzip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            ccache p7zip-full wget curl git perl python3 \
+            llvm clang lld
+          # Make `CC=clang` resolve through ccache (kernel build acceleration)
+          sudo ln -sf /usr/bin/ccache /usr/lib/ccache/clang
+          ccache -M 5G
+          ccache -o sloppiness=file_macro,time_macros
+          ccache -o run_second_cpp=true
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-clang10-${{ github.sha }}
+          restore-keys: |
+            ccache-clang10-
+
+      - name: Download clang-10 (ZyCromerZ, same as op8t.sh)
+        run: |
+          set -e
+          MAIN="$(dirname "$GITHUB_WORKSPACE")"
+          if [ ! -d "$MAIN/clang-10/bin" ]; then
+            mkdir -p "$MAIN/clang-10"
+            cd "$MAIN/clang-10"
+            wget -q https://raw.githubusercontent.com/ZyCromerZ/Clang/main/Clang-10-link.txt
+            clang_link="$(cat Clang-10-link.txt)"
+            wget -q "$clang_link"
+            tar -xf "$(basename "$clang_link")"
+          fi
+          # Fallback: if the tarball extracted into a top-level dir, point at it
+          if [ ! -x "$MAIN/clang-10/bin/clang" ]; then
+            bindir="$(dirname "$(find "$MAIN/clang-10" -maxdepth 3 -type f -name clang | head -n1)")"
+            echo "clang found at: $bindir"
+            ln -sfn "$bindir" "$MAIN/clang-10/bin"
+          fi
+          "$MAIN/clang-10/bin/clang" --version | head -n1
+
+      - name: Integrate KernelSU-Next (susfs line) + verify
+        run: |
+          set -e
+          # Clones re-noroi/KernelSU-Next, checks out the requested ref, symlinks
+          # drivers/kernelsu -> KernelSU-Next/kernel and adds the drivers/
+          # Makefile + Kconfig entries (same script FakeDreamer's kernel uses).
+          curl -LSs "$KSU_SETUP_URL" | bash -s "${{ inputs.ksu_ref }}"
+          echo "---- integration verification ----"
+          grep -n "config KSU_SUSFS" drivers/kernelsu/Kconfig
+          grep -n "KSU_SUSFS_TRY_UMOUNT" drivers/kernelsu/Kconfig
+          test -f fs/susfs.c && echo "OK: fs/susfs.c present (tree v1.5.5)"
+          test -f include/linux/susfs.h && echo "OK: include/linux/susfs.h present"
+          grep -q 'obj-\$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile \
+            && echo "OK: fs/Makefile wires susfs.o under CONFIG_KSU_SUSFS"
+          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig \
+            && echo "OK: drivers/Kconfig sources kernelsu Kconfig"
+
+      - name: Configure kernel (kona-perf defconfig + KSU/SUSFS)
+        run: |
+          set -e
+          export PATH="/usr/lib/ccache:$(dirname "$GITHUB_WORKSPACE")/clang-10/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          if [ "${{ inputs.clean_build }}" == "true" ] || [ ! -d out ]; then
+            rm -rf out
+          fi
+          make $KERNEL_DEFCONFIG O=out CC=clang
+          # All of these default to y in the KSU-Next susfs Kconfig; forcing
+          # them explicitly keeps the build deterministic and verifiable.
+          ./scripts/config --file out/.config \
+            -e KSU \
+            -e KSU_SUSFS \
+            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
+            -e KSU_SUSFS_SUS_PATH \
+            -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT \
+            -e KSU_SUSFS_SUS_OVERLAYFS \
+            -e KSU_SUSFS_TRY_UMOUNT \
+            -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+            -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_ENABLE_LOG \
+            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            -e KSU_SUSFS_OPEN_REDIRECT
+          make olddefconfig O=out CC=clang ARCH=arm64
+          echo "---- .config verification ----"
+          grep -E '^CONFIG_KSU=|^CONFIG_KSU_SUSFS=|^CONFIG_KSU_SUSFS_TRY_UMOUNT=|^CONFIG_KSU_SUSFS_SUS_PATH=' out/.config
+          grep -qE '^CONFIG_KSU=y' out/.config && grep -qE '^CONFIG_KSU_SUSFS=y' out/.config \
+            && echo "OK: CONFIG_KSU=y CONFIG_KSU_SUSFS=y" \
+            || { echo "FAIL: KSU/SUSFS not enabled in .config"; exit 1; }
+
+      - name: Build kernel
+        run: |
+          set -e
+          export PATH="/usr/lib/ccache:$(dirname "$GITHUB_WORKSPACE")/clang-10/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          make -j$(nproc --all) O=out CC=clang ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            NM=llvm-nm OBJDUMP=llvm-objdump STRIP=llvm-strip
+          echo "---- kernel release ----"
+          cat out/include/generated/utsrelease.h 2>/dev/null || true
+          echo "---- boot artifacts ----"
+          ls -la out/arch/arm64/boot/Image out/arch/arm64/boot/dtb out/arch/arm64/boot/dtbo.img
+
+      - name: Package AnyKernel3 zip
+        run: |
+          set -e
+          ZIMAGE_DIR="$GITHUB_WORKSPACE/out/arch/arm64/boot"
+          TIME="$(date "+%Y%m%d-%H%M%S")"
+          mkdir -p tmp
+          cp -fp "$ZIMAGE_DIR/Image" tmp
+          cp -fp "$ZIMAGE_DIR/dtbo.img" tmp
+          cp -fp "$ZIMAGE_DIR/dtb" tmp
+          cp -rp anykernel/* tmp
+          cd tmp
+          7za a -mx9 tmp.zip . > /dev/null
+          7za t tmp.zip > /dev/null
+          cd ..
+          ZIP_NAME="BT-op8t-4.19.157-KSU-stable-$TIME.zip"
+          cp -fp tmp/tmp.zip "$ZIP_NAME"
+          cp -fp tmp/tmp.zip kebab-susfs-boot.zip
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "---- zip contents (must include Image, dtb, dtbo.img) ----"
+          unzip -l "$ZIP_NAME" | grep -E "Image|dtb|dtbo|anykernel.sh|META-INF|tools/" | head -20
+          ls -la "$ZIP_NAME" kebab-susfs-boot.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kebab-susfs-boot
+          path: |
+            BT-op8t-*.zip
+            kebab-susfs-boot.zip
+          if-no-files-found: error
