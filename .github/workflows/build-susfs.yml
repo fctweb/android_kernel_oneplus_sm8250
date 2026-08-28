@@ -130,6 +130,7 @@ jobs:
           # Clones re-noroi/KernelSU-Next, checks out the requested ref, symlinks
           # drivers/kernelsu -> KernelSU-Next/kernel and adds the drivers/
           # Makefile + Kconfig entries (same script FakeDreamer's kernel uses).
+          cd "$GITHUB_WORKSPACE"
           curl -LSs "$KSU_SETUP_URL" | bash -s "${{ inputs.ksu_ref }}"
           echo "---- integration verification ----"
           grep -n "config KSU_SUSFS" drivers/kernelsu/Kconfig
