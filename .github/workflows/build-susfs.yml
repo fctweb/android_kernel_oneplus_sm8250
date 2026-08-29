@@ -100,7 +100,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-clang10-${{ github.sha }}
+          key: ccache-clang10-v2-${{ github.sha }}
           restore-keys: |
             ccache-clang10-
 
@@ -141,13 +141,26 @@ jobs:
             && echo "OK: fs/Makefile wires susfs.o under CONFIG_KSU_SUSFS"
           grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig \
             && echo "OK: drivers/Kconfig sources kernelsu Kconfig"
+          # HARD GATE: dispatch must be present in core_hook.c (whole SUSFS block
+          # is #ifdef CONFIG_KSU_SUSFS there). Absent -> wrong branch/commit.
+          grep -q "CMD_SUSFS_SHOW_VERSION" drivers/kernelsu/core_hook.c \
+            && grep -q "CMD_SUSFS_SET_UNAME" drivers/kernelsu/core_hook.c \
+            && echo "OK: SUSFS dispatch present in core_hook.c" \
+            || { echo "FAIL: SUSFS dispatch (CMD_SUSFS_*) not in core_hook.c — wrong KSU branch/commit"; exit 1; }
 
       - name: Configure kernel (kona-perf defconfig + KSU/SUSFS)
         run: |
           set -e
           export PATH="/usr/lib/ccache:$(dirname "$GITHUB_WORKSPACE")/clang-10/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
-          if [ "${{ inputs.clean_build }}" == "true" ] || [ ! -d out ]; then
+          # Full clean rebuild when requested: drop out/ AND the ccache snapshot
+          # so no stale pre-SUSFS object can be reused.
+          if [ "${{ inputs.clean_build }}" == "true" ]; then
+            rm -rf out
+            ccache -C 2>/dev/null || true
+            ccache -z 2>/dev/null || true
+          fi
+          if [ ! -d out ]; then
             rm -rf out
           fi
           make $KERNEL_DEFCONFIG O=out CC=clang
@@ -176,6 +189,12 @@ jobs:
           grep -qE '^CONFIG_KSU=y' out/.config && grep -qE '^CONFIG_KSU_SUSFS=y' out/.config \
             && echo "OK: CONFIG_KSU=y CONFIG_KSU_SUSFS=y" \
             || { echo "FAIL: KSU/SUSFS not enabled in .config"; exit 1; }
+          # Ensure generated config is materialized so the #ifdef CONFIG_KSU_SUSFS
+          # block actually compiles into core_hook.o.
+          make prepare O=out CC=clang ARCH=arm64
+          grep -q "CONFIG_KSU_SUSFS" out/include/generated/autoconf.h \
+            && echo "OK: CONFIG_KSU_SUSFS in autoconf.h" \
+            || { echo "FAIL: CONFIG_KSU_SUSFS not in out/include/generated/autoconf.h"; exit 1; }
 
       - name: Build kernel
         run: |
@@ -189,6 +208,25 @@ jobs:
           cat out/include/generated/utsrelease.h 2>/dev/null || true
           echo "---- boot artifacts ----"
           ls -la out/arch/arm64/boot/Image out/arch/arm64/boot/dtb out/arch/arm64/boot/dtbo.img
+          # HARD GATE: confirm SUSFS dispatch actually linked into the kernel.
+          # susfs_init lives in fs/susfs.o (CONFIG_KSU_SUSFS), and the dispatch
+          # calls susfs_try_umount_all/susfs_init from core_hook.o. If these
+          # symbols are in vmlinux, the #ifdef CONFIG_KSU_SUSFS block compiled.
+          if [ -f out/vmlinux ]; then
+            n_susfs=$(nm out/vmlinux 2>/dev/null | grep -cE ' susfs_init$| susfs_try_umount_all$| susfs_spoof_uname$| susfs_add_sus_mount$')
+            echo "susfs symbols in vmlinux: $n_susfs"
+            [ "$n_susfs" -ge 2 ] || { echo "FAIL: SUSFS dispatch not linked (susfs syms=$n_susfs)"; exit 1; }
+          else
+            echo "WARN: no vmlinux; relying on Image string gate below"
+          fi
+          # Image has no symtab; check for the CMD_SUSFS pr_err strings that the
+          # dispatch emits under CONFIG_KSU_SUSFS.
+          if grep -aq "CMD_SUSFS_ADD_SUS_MOUNT" out/arch/arm64/boot/Image; then
+            echo "OK: CMD_SUSFS dispatch strings present in Image"
+          else
+            echo "FAIL: no CMD_SUSFS dispatch strings in Image — SUSFS dispatch NOT compiled"
+            exit 1
+          fi
 
       - name: Package AnyKernel3 zip
         run: |
